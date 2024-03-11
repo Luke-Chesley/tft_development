@@ -13,7 +13,7 @@ def train_model(config):
         val_dataloaders=val_dataloader,
         # include this to resume training, comment out to train with new params
         # figure out way to link config and different checkpoints?
-        ckpt_path="tft/checkpoints/6/epoch=4-val_loss=787.53.ckpt",
+        #ckpt_path="tft/checkpoints/6/epoch=4-val_loss=787.53.ckpt",
     )
 
 
