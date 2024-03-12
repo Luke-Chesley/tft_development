@@ -2,7 +2,7 @@
 
 
 
-# implementation architecture  
+# theoretical architecture  
 ```mermaid
 
 graph LR
@@ -17,7 +17,7 @@ graph LR
     C ---> D[/LSTM Encoder/]
     CC --> D
     CCC --> E[\LSTM Decoder\]
-    D --> E
+    D -->|Encoder final state <br>- becomes decoder <br>- initial state| E
     D --> F[/LSTM Encoder Add Norm\]
     CC --> F
     F --> G((Static Enrichment))
@@ -34,3 +34,43 @@ graph LR
     K --> L((Output))
 
 ```
+
+# implementation architecture  
+```mermaid
+
+graph LR
+    %% Input, embeddings and variable selection
+    A[General metadata: <br>- encoder/decoder_len <br>- var types] --> B
+    B((Raw Inputs = input_vectors <br>- contains all variable types)) -->|Variable selection network| C[static_embedding]
+    D[embeddings_varying_encoder]
+    B --> |Variable selection network|D
+    E[embeddings_varying_decoder]
+    B --> |variable selection network|E
+
+    %% LSTM
+    F[LSTM input_hidden]
+    G[LSTM input_cell]
+    C --> F
+    C --> G
+
+
+    H[LSTM encoder]
+    F --> H
+    G --> H
+    D --> H
+    II[Gated linear unit]
+    I[Encoder output]
+    H --> II
+    II --> I
+    %% stopped right here add glu to decoder output
+    J[LSTM decoder]
+    E --> J
+    I --> J
+    K[Decoder Output]
+    J --> K 
+
+   
+   
+
+```
+

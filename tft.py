@@ -1245,6 +1245,8 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
             encoder_lengths=encoder_lengths,
             decoder_lengths=decoder_lengths,
         )
+    
+    # ------------------------------------------------------------------------------------------------------------------
 
     def interpret_output(
         self,
