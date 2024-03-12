@@ -6,16 +6,52 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics import Metric as LightningMetric
 from pytorch_forecasting.models.base_model import BaseModelWithCovariates
-from pytorch_forecasting.metrics import MAPE, MASE, RMSE, SMAPE, MultiHorizonMetric, QuantileLoss
+from pytorch_forecasting.metrics import (
+    MAPE,
+    MASE,
+    RMSE,
+    SMAPE,
+    MultiHorizonMetric,
+    QuantileLoss,
+)
 from pytorch_forecasting.models.nn import LSTM
-from utils import get_embedding_size
+from utils import get_embedding_size, masked_op
 from metrics import MAE
+import matplotlib.pyplot as plt
+
+
+def integer_histogram(
+    data: torch.LongTensor, min: Union[None, int] = None, max: Union[None, int] = None
+) -> torch.Tensor:
+    """
+    Create histogram of integers in predefined range
+
+    Args:
+        data: data for which to create histogram
+        min: minimum of histogram, is inferred from data by default
+        max: maximum of histogram, is inferred from data by default
+
+    Returns:
+        histogram
+    """
+    uniques, counts = torch.unique(data, return_counts=True)
+    if min is None:
+        min = uniques.min()
+    if max is None:
+        max = uniques.max()
+    hist = torch.zeros(max - min + 1, dtype=torch.long, device=data.device).scatter(
+        dim=0, index=uniques - min, src=counts
+    )
+    return hist
+
 
 # ctrl + shift + . to see all classes
 
 
 class MyScaledDotProductAttention(nn.Module):
-    def __init__(self, dropout: float = None, scale: bool = False, *args, **kwargs) -> None:
+    def __init__(
+        self, dropout: float = None, scale: bool = False, *args, **kwargs
+    ) -> None:
         super().__init__(*args, **kwargs)
         if dropout is not None:
             self.dropout = nn.Dropout(p=dropout)
@@ -28,7 +64,9 @@ class MyScaledDotProductAttention(nn.Module):
         attn = torch.bmm(q, k.permute(0, 2, 1))
 
         if self.scale:
-            dimension = torch.as_tensor(k.size(-1), dtype=attn.dtype, device=attn.device).sqrt()
+            dimension = torch.as_tensor(
+                k.size(-1), dtype=attn.dtype, device=attn.device
+            ).sqrt()
             attn = attn / dimension
         if mask is not None:
             attn = attn.masked_fill(mask, -1e9)
@@ -41,7 +79,9 @@ class MyScaledDotProductAttention(nn.Module):
 
 
 class MyInterpretableMultiHeadAttention(nn.Module):
-    def __init__(self, n_head: int, d_model: int, dropout: float = 0.0, *args, **kwargs) -> None:
+    def __init__(
+        self, n_head: int, d_model: int, dropout: float = 0.0, *args, **kwargs
+    ) -> None:
         super().__init__(*args, **kwargs)
 
         self.n_head = n_head
@@ -50,12 +90,16 @@ class MyInterpretableMultiHeadAttention(nn.Module):
         assert d_model % n_head == 0, "d_model must be divisible by n_head"
 
         self.d_k = self.d_q = self.d_v = d_model // n_head
-        
+
         self.dropout = nn.Dropout(p=dropout)
 
         self.v_layer = nn.Linear(self.d_model, self.d_v)
-        self.q_layers = nn.ModuleList(nn.Linear(self.d_model, self.d_q) for _ in range(self.n_head))
-        self.k_layers = nn.ModuleList(nn.Linear(self.d_model, self.d_k) for _ in range(self.n_head))
+        self.q_layers = nn.ModuleList(
+            nn.Linear(self.d_model, self.d_q) for _ in range(self.n_head)
+        )
+        self.k_layers = nn.ModuleList(
+            nn.Linear(self.d_model, self.d_k) for _ in range(self.n_head)
+        )
         self.attention = MyScaledDotProductAttention()
         self.w_h = nn.Linear(self.d_v, self.d_model, bias=False)
 
@@ -91,7 +135,14 @@ class MyInterpretableMultiHeadAttention(nn.Module):
 
 
 class MyTimeDistributedInterpolation(nn.Module):
-    def __init__(self, output_size: int, batch_first: bool = False, trainable: bool = False, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        output_size: int,
+        batch_first: bool = False,
+        trainable: bool = False,
+        *args,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
 
         self.output_size = output_size
@@ -103,7 +154,9 @@ class MyTimeDistributedInterpolation(nn.Module):
             self.gate = nn.Sigmoid()
 
     def interpolate(self, x):
-        upsampled = F.interpolate(x.unsqueeze(1), self.output_size, mode="linear", align_corners=True).squeeze(1)
+        upsampled = F.interpolate(
+            x.unsqueeze(1), self.output_size, mode="linear", align_corners=True
+        ).squeeze(1)
         if self.trainable:
             upsampled = upsampled * self.gate(self.mask.unsqueeze(0)) * 2.0
 
@@ -115,13 +168,17 @@ class MyTimeDistributedInterpolation(nn.Module):
 
         # squeeze timesteps and samples into a single axis
 
-        x_reshape = x.contiguous().view(-1, x.size(-1))  # (samples * timesteps, input_size)
+        x_reshape = x.contiguous().view(
+            -1, x.size(-1)
+        )  # (samples * timesteps, input_size)
 
         y = self.interpolate(x_reshape)
         # reshape y to match
 
         if self.batch_first:
-            y = y.contiguous().view(x.size(0), -1, y.size(-1))  # (samples, timesteps, output_size)
+            y = y.contiguous().view(
+                x.size(0), -1, y.size(-1)
+            )  # (samples, timesteps, output_size)
         else:
             y = y.view(-1, x.size(1), y.size(-1))  # (timesteps, samples,output_size)
 
@@ -129,7 +186,14 @@ class MyTimeDistributedInterpolation(nn.Module):
 
 
 class MyGatedLinearUnit(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int = None, dropout: float = None, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int = None,
+        dropout: float = None,
+        *args,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
 
         if dropout is not None:
@@ -162,7 +226,14 @@ class MyGatedLinearUnit(nn.Module):
 
 
 class MyAddNorm(nn.Module):
-    def __init__(self, input_size: int, skip_size: int = None, trainable_add: bool = True, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        input_size: int,
+        skip_size: int = None,
+        trainable_add: bool = True,
+        *args,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
 
         self.input_size = input_size
@@ -170,9 +241,11 @@ class MyAddNorm(nn.Module):
         self.skip_size = skip_size or input_size
 
         if self.input_size != self.skip_size:
-            # if input size is not the same as skip size, we need to resample(resize, linearly 
+            # if input size is not the same as skip size, we need to resample(resize, linearly
             # interpolate) the skip connection
-            self.resample = MyTimeDistributedInterpolation(self.input_size, batch_first=True, trainable=False)
+            self.resample = MyTimeDistributedInterpolation(
+                self.input_size, batch_first=True, trainable=False
+            )
 
         if self.trainable_add:
             self.mask = nn.Parameter(torch.zeros(self.input_size, dtype=torch.float))
@@ -210,7 +283,9 @@ class MyGatedAddNorm(nn.Module):
         self.skip_size = skip_size or self.hidden_size
         self.dropout = dropout
 
-        self.glu = MyGatedLinearUnit(self.input_size, hidden_size=self.hidden_size, dropout=self.dropout)
+        self.glu = MyGatedLinearUnit(
+            self.input_size, hidden_size=self.hidden_size, dropout=self.dropout
+        )
         self.add_norm = MyAddNorm(
             self.hidden_size, skip_size=self.skip_size, trainable_add=trainable_add
         )  # this is passed not as a self. because it is not used as a parameter of this class only to initialize other things
@@ -223,7 +298,14 @@ class MyGatedAddNorm(nn.Module):
 
 
 class MyResampleNorm(nn.Module):
-    def __init__(self, input_size: int, output_size: int, trainable_add: bool = True, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        trainable_add: bool = True,
+        *args,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
 
         self.input_size = input_size
@@ -232,7 +314,9 @@ class MyResampleNorm(nn.Module):
 
         if self.input_size != self.output_size:
             # if the input size is not the same as the output size, we need to resize the output
-            self.resample = MyTimeDistributedInterpolation(self.output_size, batch_first=True, trainable=False)
+            self.resample = MyTimeDistributedInterpolation(
+                self.output_size, batch_first=True, trainable=False
+            )
 
         if self.trainable_add:
             self.mask = nn.Parameter(torch.zeros(self.output_size, dtype=torch.float))
@@ -282,7 +366,7 @@ class MyGatedResidualNetwork(nn.Module):
 
         self.fc1 = nn.Linear(self.input_size, self.hidden_size)
 
-        self.elu = nn.ELU() # why is this elu and not relu? 
+        self.elu = nn.ELU()  # why is this elu and not relu?
 
         if self.context_size is not None:
             self.context = nn.Linear(self.context_size, self.hidden_size, bias=False)
@@ -304,7 +388,9 @@ class MyGatedResidualNetwork(nn.Module):
             if "bias" in name:
                 torch.nn.init.zeros_(p)
             elif "fc1" in name or "fc2" in name:
-                torch.nn.init.kaiming_normal_(p, a=0, mode="fan_in", nonlinearity="leaky_relu")
+                torch.nn.init.kaiming_normal_(
+                    p, a=0, mode="fan_in", nonlinearity="leaky_relu"
+                )
             elif "context" in name:
                 torch.nn.init.xavier_normal_(p)
 
@@ -373,7 +459,9 @@ class MyVariableSelectionNetwork(nn.Module):
             if name in single_variable_grns:
                 self.single_variable_grns[name] = single_variable_grns[name]
             elif self.input_embedding_flags.get(name, False):
-                self.single_variable_grns[name] = MyResampleNorm(input_size, self.hidden_size)
+                self.single_variable_grns[name] = MyResampleNorm(
+                    input_size, self.hidden_size
+                )
             else:
                 self.single_variable_grns[name] = MyGatedResidualNetwork(
                     input_size,
@@ -390,7 +478,10 @@ class MyVariableSelectionNetwork(nn.Module):
 
     @property
     def input_size_total(self):
-        return sum(size if name in self.input_embedding_flags else size for name, size in self.input_sizes.items())
+        return sum(
+            size if name in self.input_embedding_flags else size
+            for name, size in self.input_sizes.items()
+        )
 
     @property
     def num_inputs(self):
@@ -411,7 +502,7 @@ class MyVariableSelectionNetwork(nn.Module):
             var_outputs = torch.stack(var_outputs, dim=-1)
 
             # calculate variable weights
-            ## get all of the embeddings from all of the variables and just combine them, very simple
+            ## get all of the embeddings from all of the variables and just cat them, very simple
             flat_embedding = torch.cat(weight_inputs, dim=-1)
             #
             sparse_weights = self.flattened_grn(flat_embedding, context)
@@ -425,11 +516,17 @@ class MyVariableSelectionNetwork(nn.Module):
             variable_embedding = x[name]
             if name in self.prescalers:
                 variable_embedding = self.prescalers[name](variable_embedding)
-            outputs = self.single_variable_grns[name](variable_embedding)  # fast forward if only one variable
+            outputs = self.single_variable_grns[name](
+                variable_embedding
+            )  # fast forward if only one variable
             if outputs.ndim == 3:  # batch_size, time, hidden size, n_variables
-                sparse_weights = torch.ones(outputs.size(0), outputs.size(1), 1, 1, device=outputs.device)
+                sparse_weights = torch.ones(
+                    outputs.size(0), outputs.size(1), 1, 1, device=outputs.device
+                )
             else:  # ndim == 2 -> batch_size, time, n_variables
-                sparse_weights = torch.ones(outputs.size(0), 1, 1, device=outputs.device)
+                sparse_weights = torch.ones(
+                    outputs.size(0), 1, 1, device=outputs.device
+                )
 
         # the outputs are a weighted sum of the importance of each variable for the current time step?
         return outputs, sparse_weights
@@ -449,7 +546,9 @@ class MyTimeDistributedEmbeddingBag(nn.EmbeddingBag):
 
         # We have to reshape Y
         if self.batch_first:
-            y = y.contiguous().view(x.size(0), -1, y.size(-1))  # (samples, timesteps, output_size)
+            y = y.contiguous().view(
+                x.size(0), -1, y.size(-1)
+            )  # (samples, timesteps, output_size)
         else:
             y = y.view(-1, x.size(1), y.size(-1))  # (timesteps, samples, output_size)
         return y
@@ -465,7 +564,9 @@ class MyMultiEmbedding(nn.Module):
 
     def __init__(
         self,
-        embedding_sizes: Union[Dict[str, Tuple[int, int]], Dict[str, int], List[int], List[Tuple[int, int]]],
+        embedding_sizes: Union[
+            Dict[str, Tuple[int, int]], Dict[str, int], List[int], List[Tuple[int, int]]
+        ],
         x_categoricals: List[str] = None,
         categorical_groups: Dict[str, List[str]] = {},
         embedding_paddings: List[str] = [],
@@ -477,8 +578,12 @@ class MyMultiEmbedding(nn.Module):
             self.concat_output = False
 
             # input data checks
-            assert x_categoricals is not None, "x_categoricals must be provided."  # groups(fueltype)
-            categorical_group_variables = [name for names in categorical_groups.values() for name in names]
+            assert (
+                x_categoricals is not None
+            ), "x_categoricals must be provided."  # groups(fueltype)
+            categorical_group_variables = [
+                name for names in categorical_groups.values() for name in names
+            ]
             if len(categorical_groups) > 0:
                 assert all(
                     name in embedding_sizes for name in categorical_groups
@@ -490,7 +595,9 @@ class MyMultiEmbedding(nn.Module):
                     name in x_categoricals for name in categorical_group_variables
                 ), "group variables in categorical_groups must be in x_categoricals."
             assert all(
-                name in embedding_sizes for name in embedding_sizes if name not in categorical_group_variables
+                name in embedding_sizes
+                for name in embedding_sizes
+                if name not in categorical_group_variables
             ), (
                 "all variables in embedding_sizes must be in x_categoricals - but only if"
                 "not already in categorical_groups."
@@ -500,7 +607,9 @@ class MyMultiEmbedding(nn.Module):
                 x_categoricals is None and len(categorical_groups) == 0
             ), " If embedding_sizes is not a dictionary, categorical_groups and x_categoricals must be empty."
             # number embeddings based on order
-            embedding_sizes = {str(name): size for name, size in enumerate(embedding_sizes)}
+            embedding_sizes = {
+                str(name): size for name, size in enumerate(embedding_sizes)
+            }
             x_categoricals = list(embedding_sizes.keys())
             self.concat_output = True
 
@@ -528,7 +637,10 @@ class MyMultiEmbedding(nn.Module):
 
             if name in self.categorical_groups:  # embedding bag if related embedding
                 self.embeddings[name] = MyTimeDistributedEmbeddingBag(
-                    self.embedding_sizes[name][0], embedding_size, mode="sum", batch_first=True
+                    self.embedding_sizes[name][0],
+                    embedding_size,
+                    mode="sum",
+                    batch_first=True,
                 )
             else:
                 if name in self.embedding_paddings:
@@ -536,7 +648,9 @@ class MyMultiEmbedding(nn.Module):
                 else:
                     padding_idx = None
                 self.embeddings[name] = nn.Embedding(
-                    self.embedding_sizes[name][0], embedding_size, padding_idx=padding_idx
+                    self.embedding_sizes[name][0],
+                    embedding_size,
+                    padding_idx=padding_idx,
                 )
 
     def names(self):
@@ -576,7 +690,10 @@ class MyMultiEmbedding(nn.Module):
                 input_vectors[name] = emb(
                     x[
                         ...,  # select all preceding dimensions
-                        [self.x_categoricals.index(cat_name) for cat_name in self.categorical_groups[name]],
+                        [
+                            self.x_categoricals.index(cat_name)
+                            for cat_name in self.categorical_groups[name]
+                        ],
                     ]
                 )
             else:
@@ -631,7 +748,9 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         # this comes from Superclass of LightningModule -> HyperparametersMixIn, saves params in hparams attribute
         self.save_hyperparameters(ignore=["loss", "logging_metrics"])
 
-        assert isinstance(loss, LightningMetric), "Loss must be Pytorch Lightning 'Metric'"
+        assert isinstance(
+            loss, LightningMetric
+        ), "Loss must be Pytorch Lightning 'Metric'"
         # override defaults in BaseModel
         super().__init__(loss=loss, logging_metrics=logging_metrics, **kwargs)
 
@@ -649,7 +768,12 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         # continuous variable processing
         self.prescalers = nn.ModuleDict(
             {
-                name: nn.Linear(1, self.hparams.hidden_continuous_sizes.get(name, self.hparams.hidden_continuous_size))
+                name: nn.Linear(
+                    1,
+                    self.hparams.hidden_continuous_sizes.get(
+                        name, self.hparams.hidden_continuous_size
+                    ),
+                )
                 for name in self.reals  # from base model -> """List of all continuous variables in model"""
             }  # static_categoricals + time_varying_categorical_encoder + time_varying_categorical_decoder,
         )  # {name:Linear layer(1,10)} for all continuous vars. hidden_continuous_sizes can be a dict of different sizes
@@ -657,49 +781,63 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         # variable selection
 
         ## variable selection for static variables
-        static_input_sizes = {  # not defined as an attribute just a local variable to be used shortly
-            name: self.input_embeddings.output_size[name] for name in self.hparams.static_categoricals
-        }  # {'fueltype':5} for my example
+        static_input_sizes = (
+            {  # not defined as an attribute just a local variable to be used shortly
+                name: self.input_embeddings.output_size[name]
+                for name in self.hparams.static_categoricals
+            }
+        )  # {'fueltype':5} for my example
 
         static_input_sizes.update(
             {
-                name: self.hparams.hidden_continuous_sizes.get(name, self.hparams.hidden_continuous_size)
+                name: self.hparams.hidden_continuous_sizes.get(
+                    name, self.hparams.hidden_continuous_size
+                )
                 for name in self.hparams.static_reals
             }
         )  # {'encoder_length':10, 'value_center':10,'value_scale':10}
 
-        print(static_input_sizes)
-        print(self.hparams.hidden_size)
-        print({name: True for name in self.hparams.static_categoricals})
-        print(self.hparams.dropout)
-        print(self.prescalers)
-
+        #  print(static_input_sizes)
+        #  print(self.hparams.hidden_size)
+        #  print(
+        #     {name: True for name in self.hparams.static_categoricals}
+        # )
+        #  print(self.hparams.dropout)
+        #  print(self.prescalers)
         self.static_variable_selection = MyVariableSelectionNetwork(
             input_sizes=static_input_sizes,
             hidden_size=self.hparams.hidden_size,
-            input_embedding_flags={name: True for name in self.hparams.static_categoricals},
+            input_embedding_flags={
+                name: True for name in self.hparams.static_categoricals
+            },
             dropout=self.hparams.dropout,
             prescalers=self.prescalers,
         )
 
         # variable selection for encoder and decoder
         encoder_input_sizes = {
-            name: self.input_embeddings.output_size[name] for name in self.hparams.time_varying_categoricals_encoder
+            name: self.input_embeddings.output_size[name]
+            for name in self.hparams.time_varying_categoricals_encoder
         }
 
         encoder_input_sizes.update(
             {
-                name: self.hparams.hidden_continuous_sizes.get(name, self.hparams.hidden_continuous_size)
+                name: self.hparams.hidden_continuous_sizes.get(
+                    name, self.hparams.hidden_continuous_size
+                )
                 for name in self.hparams.time_varying_reals_encoder
             }
         )
 
         decoder_input_sizes = {
-            name: self.input_embeddings.output_size[name] for name in self.hparams.time_varying_categoricals_decoder
+            name: self.input_embeddings.output_size[name]
+            for name in self.hparams.time_varying_categoricals_decoder
         }
         decoder_input_sizes.update(
             {
-                name: self.hparams.hidden_continuous_sizes.get(name, self.hparams.hidden_continuous_size)
+                name: self.hparams.hidden_continuous_sizes.get(
+                    name, self.hparams.hidden_continuous_size
+                )
                 for name in self.hparams.time_varying_reals_decoder
             }
         )
@@ -726,23 +864,31 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         self.encoder_variable_selection = MyVariableSelectionNetwork(
             input_sizes=encoder_input_sizes,
             hidden_size=self.hparams.hidden_size,
-            input_embedding_flags={name: True for name in self.hparams.time_varying_categoricals_encoder},
+            input_embedding_flags={
+                name: True for name in self.hparams.time_varying_categoricals_encoder
+            },
             dropout=self.hparams.dropout,
             context_size=self.hparams.hidden_size,
             prescalers=self.prescalers,
             single_variable_grns=(
-                {} if not self.hparams.share_single_variable_networks else self.shared_single_variable_grns
+                {}
+                if not self.hparams.share_single_variable_networks
+                else self.shared_single_variable_grns
             ),
         )
         self.decoder_variable_selection = MyVariableSelectionNetwork(
             input_sizes=decoder_input_sizes,
             hidden_size=self.hparams.hidden_size,
-            input_embedding_flags={name: True for name in self.hparams.time_varying_categoricals_decoder},
+            input_embedding_flags={
+                name: True for name in self.hparams.time_varying_categoricals_decoder
+            },
             dropout=self.hparams.dropout,
             context_size=self.hparams.hidden_size,
             prescalers=self.prescalers,
             single_variable_grns=(
-                {} if not self.hparams.share_single_variable_networks else self.shared_single_variable_grns
+                {}
+                if not self.hparams.share_single_variable_networks
+                else self.shared_single_variable_grns
             ),
         )
 
@@ -796,10 +942,14 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
 
         # skip connection for lstm
 
-        self.post_lstm_gate_encoder = MyGatedLinearUnit(self.hparams.hidden_size, dropout=self.hparams.dropout)
+        self.post_lstm_gate_encoder = MyGatedLinearUnit(
+            self.hparams.hidden_size, dropout=self.hparams.dropout
+        )
         self.post_lstm_gate_decoder = self.post_lstm_gate_encoder
 
-        self.post_lstm_add_norm_encoder = MyAddNorm(self.hparams.hidden_size, trainable_add=False)
+        self.post_lstm_add_norm_encoder = MyAddNorm(
+            self.hparams.hidden_size, trainable_add=False
+        )
 
         self.post_lstm_add_norm_decoder = self.post_lstm_add_norm_encoder
 
@@ -814,24 +964,36 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         # attention for long range processing
 
         self.multihead_attn = MyInterpretableMultiHeadAttention(
-            d_model=self.hparams.hidden_size, n_head=self.hparams.attention_head_size, dropout=self.hparams.dropout
+            d_model=self.hparams.hidden_size,
+            n_head=self.hparams.attention_head_size,
+            dropout=self.hparams.dropout,
         )
         self.post_attn_gate_norm = MyGatedAddNorm(
             self.hparams.hidden_size, dropout=self.hparams.dropout, trainable_add=False
         )
         self.pos_wise_ff = MyGatedResidualNetwork(
-            self.hparams.hidden_size, self.hparams.hidden_size, self.hparams.hidden_size, dropout=self.hparams.dropout
+            self.hparams.hidden_size,
+            self.hparams.hidden_size,
+            self.hparams.hidden_size,
+            dropout=self.hparams.dropout,
         )
 
         # output processing -> no dropout at this late stage
-        self.pre_output_gate_norm = MyGatedAddNorm(self.hparams.hidden_size, dropout=None, trainable_add=False)
+        self.pre_output_gate_norm = MyGatedAddNorm(
+            self.hparams.hidden_size, dropout=None, trainable_add=False
+        )
 
         if self.n_targets > 1:
             self.output_layer = nn.ModuleList(
-                [nn.Linear(self.hparams.hidden_size, output_size) for output_size in self.hparams.output_size]
+                [
+                    nn.Linear(self.hparams.hidden_size, output_size)
+                    for output_size in self.hparams.output_size
+                ]
             )
         else:
-            self.output_layer = nn.Linear(self.hparams.hidden_size, self.hparams.output_size)
+            self.output_layer = nn.Linear(
+                self.hparams.hidden_size, self.hparams.output_size
+            )
 
     def expand_static_context(self, context, timesteps):
         """
@@ -839,7 +1001,9 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         """
         return context[:, None].expand(-1, timesteps, -1)
 
-    def get_attention_mask(self, encoder_lengths: torch.LongTensor, decoder_lengths: torch.LongTensor):
+    def get_attention_mask(
+        self, encoder_lengths: torch.LongTensor, decoder_lengths: torch.LongTensor
+    ):
         """
         returns causal mask to apply for self-attention layer
         """
@@ -852,7 +1016,11 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
             # indices for which is predicted
             predict_step = torch.arange(0, decoder_length, device=self.device)[:, None]
             # do not attend to steps to self or after prediction
-            decoder_mask = (attend_step >= predict_step).unsqueeze(0).expand(encoder_lengths.size(0), -1, -1)
+            decoder_mask = (
+                (attend_step >= predict_step)
+                .unsqueeze(0)
+                .expand(encoder_lengths.size(0), -1, -1)
+            )
         else:
             """
             there is value in attending to future forecasts if they are made with knowledge currently available
@@ -861,9 +1029,17 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
             or alternatively using the same layer but allowing forward attention - only masking out non-available data
             and self
             """
-            decoder_mask = create_mask(decoder_length, decoder_lengths).unsqueeze(1).expand(-1, decoder_length, -1)
+            decoder_mask = (
+                create_mask(decoder_length, decoder_lengths)
+                .unsqueeze(1)
+                .expand(-1, decoder_length, -1)
+            )
         # do not attend to steps where data is padded
-        encoder_mask = create_mask(encoder_lengths.max(), encoder_lengths).unsqueeze(1).expand(-1, decoder_length, -1)
+        encoder_mask = (
+            create_mask(encoder_lengths.max(), encoder_lengths)
+            .unsqueeze(1)
+            .expand(-1, decoder_length, -1)
+        )
 
         # combine masks along attended time - encoder then decoder
 
@@ -886,7 +1062,9 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         decoder_lengths = x["decoder_lengths"]
 
         # these are the groups for each time step in the batch. encoder and decoder
-        x_cat = torch.cat([x["encoder_cat"], x["decoder_cat"]], dim=1)  # cat along time dim
+        x_cat = torch.cat(
+            [x["encoder_cat"], x["decoder_cat"]], dim=1
+        )  # cat along time dim
         # these are the raw values from the dataframe for the encoder and decoder
         x_cont = torch.cat([x["encoder_cont"], x["decoder_cont"]], dim=1)
         # num timesteps for each sample in batch
@@ -915,13 +1093,22 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         # print(f"len of static variables: {len(self.static_variables)}")
         if len(self.static_variables) > 0:
             # static embeddings will be constant over entire batch
-            static_embedding = {name: input_vectors[name][:, 0] for name in self.static_variables}
-            static_embedding, static_variable_selection = self.static_variable_selection(static_embedding)
+            static_embedding = {
+                name: input_vectors[name][:, 0] for name in self.static_variables
+            }
+
+            static_embedding, static_variable_selection = (
+                self.static_variable_selection(static_embedding)
+            )
         else:
             static_embedding = torch.zeros(
-                (x_cont.size(0), self.hparams.hidden_size), dtype=self.dtype, device=self.device
+                (x_cont.size(0), self.hparams.hidden_size),
+                dtype=self.dtype,
+                device=self.device,
             )
-            static_variable_selection = torch.zeros((x_cont.size(0), 0), dtype=self.dtype, device=self.device)
+            static_variable_selection = torch.zeros(
+                (x_cont.size(0), 0), dtype=self.dtype, device=self.device
+            )
 
         # static variable selection returns a weighted sum of the importance of each static variable
 
@@ -931,7 +1118,8 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         )
 
         embeddings_varying_encoder = {
-            name: input_vectors[name][:, :max_encoder_length] for name in self.encoder_variables
+            name: input_vectors[name][:, :max_encoder_length]
+            for name in self.encoder_variables
         }
 
         # this takes all of the embeddings and kind of like attention skip mechanism, does different
@@ -939,20 +1127,31 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
         # then concat all of the embeddings together
 
         # shape before 32 dicts of (128, 672, 1) -> shape after (128, 672, 32) ?????
-        embeddings_varying_encoder, encoder_sparse_weights = self.encoder_variable_selection(
-            embeddings_varying_encoder, static_context_variable_selection[:, :max_encoder_length]
+        #  print(embeddings_varying_encoder.keys())
+
+        embeddings_varying_encoder, encoder_sparse_weights = (
+            self.encoder_variable_selection(
+                embeddings_varying_encoder,
+                static_context_variable_selection[:, :max_encoder_length],
+            )
         )
         # same for decoder but only for the decoder variables
         embeddings_varying_decoder = {
-            name: input_vectors[name][:, max_encoder_length:] for name in self.decoder_variables
+            name: input_vectors[name][:, max_encoder_length:]
+            for name in self.decoder_variables
         }
 
-        embeddings_varying_decoder, decoder_sparse_weights = self.decoder_variable_selection(
-            embeddings_varying_decoder, static_context_variable_selection[:, max_encoder_length:]
+        embeddings_varying_decoder, decoder_sparse_weights = (
+            self.decoder_variable_selection(
+                embeddings_varying_decoder,
+                static_context_variable_selection[:, max_encoder_length:],
+            )
         )
 
         # print(f"embeddings_varying_encoder shape: {embeddings_varying_encoder.shape}")
-        #  print(f"embeddings_varying_decoder shape: {embeddings_varying_decoder.shape}")
+        # print(f"{encoder_sparse_weights.shape=}")
+        # print(f"embeddings_varying_decoder shape: {embeddings_varying_decoder.shape}")
+        # print(f"{decoder_sparse_weights.shape=}")
         # print(f"static_embedding shape: {static_embedding.shape}")
         # at this point we have static_embedding, embeddings_varying_encoder and embeddings_varying_decoder
 
@@ -963,37 +1162,47 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
             self.hparams.lstm_layers, -1, -1
         )
 
-        input_cell = self.static_context_initial_cell_lstm(static_embedding).expand(self.hparams.lstm_layers, -1, -1)
+        input_cell = self.static_context_initial_cell_lstm(static_embedding).expand(
+            self.hparams.lstm_layers, -1, -1
+        )
         # run local encoder
         encoder_output, (hidden, cell) = self.lstm_encoder(
-            embeddings_varying_encoder, (input_hidden, input_cell), lengths=encoder_lengths, enforce_sorted=False
+            embeddings_varying_encoder,
+            (input_hidden, input_cell),
+            lengths=encoder_lengths,
+            enforce_sorted=False,
         )
         # run local decoder
         decoder_output, _ = self.lstm_decoder(
-            embeddings_varying_decoder, (hidden, cell), lengths=decoder_lengths, enforce_sorted=False
+            embeddings_varying_decoder,
+            (hidden, cell),
+            lengths=decoder_lengths,
+            enforce_sorted=False,
         )
         # skip connection over lstm
 
         lstm_output_encoder = self.post_lstm_gate_encoder(encoder_output)
-        lstm_output_encoder = self.post_lstm_add_norm_encoder(lstm_output_encoder, embeddings_varying_encoder)
+        lstm_output_encoder = self.post_lstm_add_norm_encoder(
+            lstm_output_encoder, embeddings_varying_encoder
+        )
 
         lstm_output_decoder = self.post_lstm_gate_encoder(decoder_output)
-        lstm_output_decoder = self.post_lstm_add_norm_decoder(lstm_output_decoder, embeddings_varying_decoder)
+        lstm_output_decoder = self.post_lstm_add_norm_decoder(
+            lstm_output_decoder, embeddings_varying_decoder
+        )
 
-        #  print(f"lstm_output_encoder shape: {lstm_output_encoder.shape}")
-        #  print(f"lstm_output_decoder shape: {lstm_output_decoder.shape}")
+  
         # just combine them
         lstm_output = torch.cat([lstm_output_encoder, lstm_output_decoder], dim=1)
 
-        #  print(f"lstm_output shape: {lstm_output.shape}")
 
         # static enrichment
 
-        #  print(static_embedding.shape)
-        #   print(static_embedding)
+    
         static_context_enrichment = self.static_context_enrichment(static_embedding)
         attn_input = self.static_enrichment(
-            lstm_output, self.expand_static_context(static_context_enrichment, timesteps)
+            lstm_output,
+            self.expand_static_context(static_context_enrichment, timesteps),
         )
 
         # attention
@@ -1002,12 +1211,16 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
             q=attn_input[:, max_encoder_length:],  # query only for predictions
             k=attn_input,
             v=attn_input,
-            mask=self.get_attention_mask(encoder_lengths=encoder_lengths, decoder_lengths=decoder_lengths),
+            mask=self.get_attention_mask(
+                encoder_lengths=encoder_lengths, decoder_lengths=decoder_lengths
+            ),
         )
 
         # skip connection over attention
 
-        attn_output = self.post_attn_gate_norm(attn_output, attn_input[:, max_encoder_length:])
+        attn_output = self.post_attn_gate_norm(
+            attn_output, attn_input[:, max_encoder_length:]
+        )
         output = self.pos_wise_ff(attn_output)
 
         # skip connection over temporal fusion decoder (not LSTM decoder despite the LSTM output contains)
@@ -1028,6 +1241,214 @@ class MyTemporalFusionTransformer(BaseModelWithCovariates):
             decoder_attention=attn_output_weights[..., max_encoder_length:],
             static_variables=static_variable_selection,
             encoder_variables=encoder_sparse_weights,
+            decoder_variables=decoder_sparse_weights,
             encoder_lengths=encoder_lengths,
             decoder_lengths=decoder_lengths,
         )
+
+    def interpret_output(
+        self,
+        out: Dict[str, torch.Tensor],
+        reduction: str = "none",
+        attention_prediction_horizon: int = 0,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        interpret output of model
+
+        Args:
+            out: output as produced by ``forward()``
+            reduction: "none" for no averaging over batches, "sum" for summing attentions, "mean" for
+                normalizing by encode lengths
+            attention_prediction_horizon: which prediction horizon to use for attention
+
+        Returns:
+            interpretations that can be plotted with ``plot_interpretation()``
+        """
+        # take attention and concatenate if a list to proper attention object
+        batch_size = len(out["decoder_attention"])
+        if isinstance(out["decoder_attention"], (list, tuple)):
+            # start with decoder attention
+            # assume issue is in last dimension, we need to find max
+            max_last_dimension = max(x.size(-1) for x in out["decoder_attention"])
+            first_elm = out["decoder_attention"][0]
+            # create new attention tensor into which we will scatter
+            decoder_attention = torch.full(
+                (batch_size, *first_elm.shape[:-1], max_last_dimension),
+                float("nan"),
+                dtype=first_elm.dtype,
+                device=first_elm.device,
+            )
+            # scatter into tensor
+            for idx, x in enumerate(out["decoder_attention"]):
+                decoder_length = out["decoder_lengths"][idx]
+                decoder_attention[idx, :, :, :decoder_length] = x[..., :decoder_length]
+        else:
+            decoder_attention = out["decoder_attention"].clone()
+            decoder_mask = create_mask(
+                out["decoder_attention"].size(1), out["decoder_lengths"]
+            )
+            decoder_attention[
+                decoder_mask[..., None, None].expand_as(decoder_attention)
+            ] = float("nan")
+
+        if isinstance(out["encoder_attention"], (list, tuple)):
+            # same game for encoder attention
+            # create new attention tensor into which we will scatter
+            first_elm = out["encoder_attention"][0]
+            encoder_attention = torch.full(
+                (batch_size, *first_elm.shape[:-1], self.hparams.max_encoder_length),
+                float("nan"),
+                dtype=first_elm.dtype,
+                device=first_elm.device,
+            )
+            # scatter into tensor
+            for idx, x in enumerate(out["encoder_attention"]):
+                encoder_length = out["encoder_lengths"][idx]
+                encoder_attention[
+                    idx, :, :, self.hparams.max_encoder_length - encoder_length :
+                ] = x[..., :encoder_length]
+        else:
+            # roll encoder attention (so start last encoder value is on the right)
+            encoder_attention = out["encoder_attention"].clone()
+            shifts = encoder_attention.size(3) - out["encoder_lengths"]
+            new_index = (
+                torch.arange(
+                    encoder_attention.size(3), device=encoder_attention.device
+                )[None, None, None].expand_as(encoder_attention)
+                - shifts[:, None, None, None]
+            ) % encoder_attention.size(3)
+            encoder_attention = torch.gather(encoder_attention, dim=3, index=new_index)
+            # expand encoder_attentiont to full size
+            if encoder_attention.size(-1) < self.hparams.max_encoder_length:
+                encoder_attention = torch.concat(
+                    [
+                        torch.full(
+                            (
+                                *encoder_attention.shape[:-1],
+                                self.hparams.max_encoder_length
+                                - out["encoder_lengths"].max(),
+                            ),
+                            float("nan"),
+                            dtype=encoder_attention.dtype,
+                            device=encoder_attention.device,
+                        ),
+                        encoder_attention,
+                    ],
+                    dim=-1,
+                )
+
+        # combine attention vector
+        attention = torch.concat([encoder_attention, decoder_attention], dim=-1)
+        attention[attention < 1e-5] = float("nan")
+
+        # histogram of decode and encode lengths
+        encoder_length_histogram = integer_histogram(
+            out["encoder_lengths"], min=0, max=self.hparams.max_encoder_length
+        )
+        decoder_length_histogram = integer_histogram(
+            out["decoder_lengths"], min=1, max=out["decoder_variables"].size(1)
+        )
+
+        # mask where decoder and encoder where not applied when averaging variable selection weights
+        encoder_variables = out["encoder_variables"].squeeze(-2).clone()
+        encode_mask = create_mask(encoder_variables.size(1), out["encoder_lengths"])
+        encoder_variables = encoder_variables.masked_fill(
+            encode_mask.unsqueeze(-1), 0.0
+        ).sum(dim=1)
+        encoder_variables /= (
+            out["encoder_lengths"]
+            .where(out["encoder_lengths"] > 0, torch.ones_like(out["encoder_lengths"]))
+            .unsqueeze(-1)
+        )
+
+        decoder_variables = out["decoder_variables"].squeeze(-2).clone()
+        decode_mask = create_mask(decoder_variables.size(1), out["decoder_lengths"])
+        decoder_variables = decoder_variables.masked_fill(
+            decode_mask.unsqueeze(-1), 0.0
+        ).sum(dim=1)
+        decoder_variables /= out["decoder_lengths"].unsqueeze(-1)
+
+        # static variables need no masking
+        static_variables = out["static_variables"].squeeze(1)
+        # attention is batch x time x heads x time_to_attend
+        # average over heads + only keep prediction attention and attention on observed timesteps
+        attention = masked_op(
+            attention[
+                :,
+                attention_prediction_horizon,
+                :,
+                : self.hparams.max_encoder_length + attention_prediction_horizon,
+            ],
+            op="mean",
+            dim=1,
+        )
+
+        if reduction != "none":  # if to average over batches
+            static_variables = static_variables.sum(dim=0)
+            encoder_variables = encoder_variables.sum(dim=0)
+            decoder_variables = decoder_variables.sum(dim=0)
+
+            attention = masked_op(attention, dim=0, op=reduction)
+        else:
+            attention = attention / masked_op(attention, dim=1, op="sum").unsqueeze(
+                -1
+            )  # renormalize
+
+        interpretation = dict(
+            attention=attention.masked_fill(torch.isnan(attention), 0.0),
+            static_variables=static_variables,
+            encoder_variables=encoder_variables,
+            decoder_variables=decoder_variables,
+            encoder_length_histogram=encoder_length_histogram,
+            decoder_length_histogram=decoder_length_histogram,
+        )
+        return interpretation
+    def plot_interpretation(self, interpretation: Dict[str, torch.Tensor]) -> Dict[str, plt.Figure]:
+        """
+        Make figures that interpret model.
+
+        * Attention
+        * Variable selection weights / importances
+
+        Args:
+            interpretation: as obtained from ``interpret_output()``
+
+        Returns:
+            dictionary of matplotlib figures
+        """
+        figs = {}
+
+        # attention
+        fig, ax = plt.subplots()
+        attention = interpretation["attention"].detach().cpu()
+        attention = attention / attention.sum(-1).unsqueeze(-1)
+        ax.plot(
+            np.arange(-self.hparams.max_encoder_length, attention.size(0) - self.hparams.max_encoder_length), attention
+        )
+        ax.set_xlabel("Time index")
+        ax.set_ylabel("Attention")
+        ax.set_title("Attention")
+        figs["attention"] = fig
+
+        # variable selection
+        def make_selection_plot(title, values, labels):
+            fig, ax = plt.subplots(figsize=(7, len(values) * 0.25 + 2))
+            order = np.argsort(values)
+            values = values / values.sum(-1).unsqueeze(-1)
+            ax.barh(np.arange(len(values)), values[order] * 100, tick_label=np.asarray(labels)[order])
+            ax.set_title(title)
+            ax.set_xlabel("Importance in %")
+            plt.tight_layout()
+            return fig
+
+        figs["static_variables"] = make_selection_plot(
+            "Static variables importance", interpretation["static_variables"].detach().cpu(), self.static_variables
+        )
+        figs["encoder_variables"] = make_selection_plot(
+            "Encoder variables importance", interpretation["encoder_variables"].detach().cpu(), self.encoder_variables
+        )
+        figs["decoder_variables"] = make_selection_plot(
+            "Decoder variables importance", interpretation["decoder_variables"].detach().cpu(), self.decoder_variables
+        )
+
+        return figs

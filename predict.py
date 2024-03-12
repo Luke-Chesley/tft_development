@@ -203,4 +203,6 @@ def make_predictions(config, PRED_START_DATE, model_file_path, prediction_quanti
         (mae, sum_mae, adj_r2),
         fig1,
         fig2,
+        tft,
+        raw_preds
     )

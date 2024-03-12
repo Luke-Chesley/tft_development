@@ -1,7 +1,8 @@
-# THIS IS THE CURRENT FILE FOR TRAINING AND INFERENCE EVERYTHING MUST MATCH THE MODEL BEING LOADED
-
-
-from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
 from lightning.pytorch.loggers import TensorBoardLogger
 from pytorch_forecasting.metrics import QuantileLoss, MAE, MAPE, RMSE, SMAPE
 from pytorch_forecasting.data import GroupNormalizer
@@ -20,7 +21,9 @@ checkpoint_callback = ModelCheckpoint(
 )
 
 
-early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=10, verbose=False, mode="min")
+early_stop_callback = EarlyStopping(
+    monitor="val_loss", min_delta=1e-4, patience=10, verbose=False, mode="min"
+)
 lr_logger = LearningRateMonitor()  # log the learning rate
 logger = TensorBoardLogger("lightning_logs")
 
@@ -41,7 +44,11 @@ def get_config():
             24,
             48,
         ],  # can change
-        "large_time_windows": [168, 730, 8760],  # can change # DO NOT DO LESS THAN PRED LEN, MESSES THINGS UP
+        "large_time_windows": [
+            168,
+            730,
+            8760,
+        ],  # can change # DO NOT DO LESS THAN PRED LEN, MESSES THINGS UP
         "max_pred_len": 168,
         "max_encoder_len": 168 * 8,
         "min_encoder_len": 168 * 2,
@@ -80,7 +87,16 @@ def get_config():
             "embedding_sizes": {"fueltype": (8, 5)},  # where does 5 come from
             "embedding_paddings": [],
             "embedding_labels": {
-                "fueltype": {"COL": 0, "NG": 1, "NUC": 2, "OIL": 3, "OTH": 4, "SUN": 5, "WAT": 6, "WND": 7}
+                "fueltype": {
+                    "COL": 0,
+                    "NG": 1,
+                    "NUC": 2,
+                    "OIL": 3,
+                    "OTH": 4,
+                    "SUN": 5,
+                    "WAT": 6,
+                    "WND": 7,
+                }
             },
             "monotone_constaints": {},
             "share_single_variable_networks": False,
