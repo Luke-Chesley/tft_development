@@ -50,8 +50,8 @@ graph TD
     %% LSTM
     F[LSTM input_hidden]
     G[LSTM input_cell]
-    C --> F
-    C --> G
+    C --> |GRN|F
+    C --> |GRN|G
 
     %% encoder
     H[LSTM encoder]
@@ -59,24 +59,31 @@ graph TD
     G --> H
     D --> H
     II[Gated linear unit]
+    III[Encoder add norm]
     I[Encoder output]
     H --> II
-    II --> I
+    II --> III
+    D --> III
+    III --> I
+
     %% decoder
     J[LSTM decoder]
     E --> J
     I --> J
     K[Decoder Output]
     KK[Gated linear unit]
+    DK[Decoder add norm]
     J --> KK
-    KK --> K 
+    KK --> DK
+    DK --> K 
+    E --> DK
     KKK[LSTM output]
     K -->|concat| KKK
     I -->|concat| KKK
 
     %% Static Enrichment
     L((Static Enrichment /<br>- Attention input))
-    C --> L
+    C -->|expand static context| L
     KKK --> L
 
     %% attention
