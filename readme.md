@@ -53,7 +53,7 @@ graph LR
     C --> F
     C --> G
 
-
+    %% encoder
     H[LSTM encoder]
     F --> H
     G --> H
@@ -62,15 +62,38 @@ graph LR
     I[Encoder output]
     H --> II
     II --> I
-    %% stopped right here add glu to decoder output
+    %% decoder
     J[LSTM decoder]
     E --> J
     I --> J
     K[Decoder Output]
-    J --> K 
+    KK[Gated linear unit]
+    J --> KK
+    KK --> K 
+    KKK[LSTM output]
+    K -->|concat| KKK
+    I -->|concat| KKK
 
-   
-   
+    %% Static Enrichment
+    L((Static Enrichment /<br>- Attention input))
+    C --> L
+    KKK --> L
 
+    %% attention
+    M[(Multihead attention)] 
+    L --> M
+    NN[Position wise feed forward<br>Gated Residual Network]
+    NNN[Attn. gated add norm]
+    L --> NNN
+    N[Pre-output gated add norm]
+    M --> NNN
+    NNN --> NN
+    NN --> N
+    KKK --> N
+
+    %% output
+    O[Output]
+    N --> |linear layer|O
 ```
 
+ 
