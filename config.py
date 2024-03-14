@@ -10,17 +10,6 @@ from pytorch_forecasting.data import GroupNormalizer
 import torch.nn as nn
 
 
-checkpoint_callback = ModelCheckpoint(
-    dirpath="tft/checkpoints/6",
-    filename="{epoch}-{val_loss:.2f}",
-    save_top_k=1,
-    verbose=False,
-    monitor="val_loss",
-    mode="min",
-    save_weights_only=False,  # Set to False to save the optimizer state as well # default
-)
-
-
 early_stop_callback = EarlyStopping(
     monitor="val_loss", min_delta=1e-4, patience=10, verbose=False, mode="min"
 )
@@ -28,7 +17,18 @@ lr_logger = LearningRateMonitor()  # log the learning rate
 logger = TensorBoardLogger("lightning_logs")
 
 
-def get_config():
+def get_config(folder):
+
+    checkpoint_callback = ModelCheckpoint(
+        #dirpath=f"tft_dev/checkpoints/{str(folder)}",
+        dirpath=f"checkpoints/{str(folder)}",
+        filename="{epoch}-{val_loss:.2f}",
+        save_top_k=1,
+        verbose=False,
+        monitor="val_loss",
+        mode="min",
+        save_weights_only=False,  # Set to False to save the optimizer state as well # default
+    )
     return {
         # file paths
         "training_data_path": "/home/luke/projects/jupyterlab/Notebooks/tg/tft/data/power_consumption_by_fuel_type.csv",
@@ -42,23 +42,22 @@ def get_config():
             4,
             12,
             24,
-            48,
         ],  # can change
         "large_time_windows": [
             168,
             730,
             8760,
         ],  # can change # DO NOT DO LESS THAN PRED LEN, MESSES THINGS UP
-        "max_pred_len": 168,
-        "max_encoder_len": 168 * 8,
-        "min_encoder_len": 168 * 2,
+        "max_pred_len": 24,
+        "max_encoder_len": 24 * 8,
+        "min_encoder_len": 24 * 2,
         "training_cutoff_quantile": 0.9,
         "batch_size": 64,  # can change to accommodate for larger models
         "val_batch_size": 8,
         # trainer_params
         "trainer_params": {
             "accelerator": "gpu",
-            "max_epochs": 100,
+            "max_epochs": 20, 
             "enable_model_summary": True,
             "gradient_clip_val": 0.014,
             "limit_train_batches": 100,
