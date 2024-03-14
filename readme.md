@@ -69,7 +69,7 @@ graph TD
     %% decoder
     J[LSTM decoder]
     E --> J
-    I --> J
+    I -->|input cell and hidden| J
     K[Decoder Output]
     KK[Gated linear unit]
     DK[Decoder add norm]
