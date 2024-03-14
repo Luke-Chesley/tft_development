@@ -38,7 +38,7 @@ graph LR
 # implementation architecture  
 ```mermaid
 
-graph LR
+graph TD
     %% Input, embeddings and variable selection
     A[General metadata: <br>- encoder/decoder_len <br>- var types] --> B
     B((Raw Inputs = input_vectors <br>- contains all variable types)) -->|Variable selection network| C[static_embedding]
